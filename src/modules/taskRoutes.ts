@@ -1,5 +1,14 @@
 import { Router, Request, Response } from 'express';
-import { listItems, createItem, updateItem, removeItem, DatabaseInstance } from '../database';
+import {
+  listItems,
+  createItem,
+  updateItem,
+  removeItem,
+  computeTaskStats,
+  DatabaseInstance,
+  FilterOptions,
+  PriorityLevel
+} from '../database';
 
 export function createTaskRoutes(db: DatabaseInstance) {
   const router = Router();
@@ -7,9 +16,33 @@ export function createTaskRoutes(db: DatabaseInstance) {
   const handleListItems = async (req: Request, res: Response) => {
     try {
       const user = (req as any).user;
-      const userId = user?.role === 'admin' ? undefined : (user?.id || user?.username);
-      const items = await listItems(db, userId);
+      const userId = user?.role === 'admin' ? undefined : user?.id || user?.username;
+
+      const filters: FilterOptions = {
+        search: typeof req.query.search === 'string' ? req.query.search : undefined,
+        category: typeof req.query.category === 'string' ? req.query.category : undefined,
+        priority: typeof req.query.priority === 'string' ? req.query.priority : undefined,
+        status:
+          req.query.status === 'active' || req.query.status === 'completed' || req.query.status === 'all'
+            ? req.query.status
+            : undefined
+      };
+
+      const items = await listItems(db, userId, filters);
       res.json(items);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'Internal server error' });
+    }
+  };
+
+  const handleGetStats = async (req: Request, res: Response) => {
+    try {
+      const user = (req as any).user;
+      const userId = user?.role === 'admin' ? undefined : user?.id || user?.username;
+
+      const items = await listItems(db, userId);
+      const stats = computeTaskStats(items);
+      res.json(stats);
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Internal server error' });
     }
@@ -18,7 +51,7 @@ export function createTaskRoutes(db: DatabaseInstance) {
   const handleGetItem = async (req: Request, res: Response) => {
     try {
       const user = (req as any).user;
-      const userId = user?.role === 'admin' ? undefined : (user?.id || user?.username);
+      const userId = user?.role === 'admin' ? undefined : user?.id || user?.username;
       const items = await listItems(db, userId);
       const item = items.find((entry) => entry.id === Number(req.params.id));
 
@@ -34,7 +67,7 @@ export function createTaskRoutes(db: DatabaseInstance) {
   };
 
   const handleCreateItem = async (req: Request, res: Response) => {
-    const { name, done = false } = req.body ?? {};
+    const { name, done = false, description, priority, category, due_date } = req.body ?? {};
 
     if (typeof name !== 'string' || name.trim() === '') {
       res.status(400).json({ error: 'Name is required' });
@@ -44,7 +77,12 @@ export function createTaskRoutes(db: DatabaseInstance) {
     try {
       const user = (req as any).user;
       const userId = user?.id || user?.username || 'default-user';
-      const item = await createItem(db, name, Boolean(done), userId);
+      const item = await createItem(db, name, Boolean(done), userId, {
+        description: typeof description === 'string' ? description : undefined,
+        priority: priority as PriorityLevel,
+        category: typeof category === 'string' ? category : undefined,
+        due_date: typeof due_date === 'string' ? due_date : undefined
+      });
       res.status(201).json(item);
     } catch (error: any) {
       res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid item' });
@@ -53,17 +91,21 @@ export function createTaskRoutes(db: DatabaseInstance) {
 
   const handleUpdateItem = async (req: Request, res: Response) => {
     const id = Number(req.params.id);
-    const { name, done } = req.body ?? {};
+    const { name, done, description, priority, category, due_date } = req.body ?? {};
 
     try {
       const user = (req as any).user;
-      const userId = user?.role === 'admin' ? undefined : (user?.id || user?.username);
+      const userId = user?.role === 'admin' ? undefined : user?.id || user?.username;
       const item = await updateItem(
         db,
         id,
         {
           name: typeof name === 'string' ? name : undefined,
-          done: typeof done === 'boolean' ? done : undefined
+          done: typeof done === 'boolean' ? done : undefined,
+          description: typeof description === 'string' ? description : undefined,
+          priority: priority as PriorityLevel,
+          category: typeof category === 'string' ? category : undefined,
+          due_date: typeof due_date === 'string' ? due_date : undefined
         },
         userId
       );
@@ -101,6 +143,7 @@ export function createTaskRoutes(db: DatabaseInstance) {
     }
   };
 
+  router.get('/stats', handleGetStats);
   router.get(['/tasks', '/items'], handleListItems);
   router.get(['/tasks/:id', '/items/:id'], handleGetItem);
   router.post(['/tasks', '/items'], handleCreateItem);
