@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Starter App - Frontend</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+        padding: 2rem;
+        background: #0f172a;
+        color: #f8fafc;
+        margin: 0;
+      }
+      .card {
+        max-width: 680px;
+        margin: 2rem auto;
+        background: #1e293b;
+        border-radius: 12px;
+        padding: 2rem;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+      }
+      h1 { margin-top: 0; color: #38bdf8; }
+      .input-group { display: flex; gap: 0.5rem; margin: 1.5rem 0; }
+      input {
+        flex: 1;
+        padding: 0.75rem 1rem;
+        border-radius: 8px;
+        border: 1px solid #334155;
+        background: #0f172a;
+        color: white;
+        font-size: 1rem;
+      }
+      button {
+        padding: 0.75rem 1.25rem;
+        font-size: 1rem;
+        font-weight: 600;
+        border-radius: 8px;
+        border: none;
+        background: #38bdf8;
+        color: #0f172a;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      button:hover { background: #7dd3fc; }
+      ul { list-style: none; padding: 0; margin: 0; }
+      li {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.85rem 1rem;
+        background: #334155;
+        border-radius: 8px;
+        margin-bottom: 0.5rem;
+      }
+      .done { text-decoration: line-through; color: #94a3b8; }
+      .btn-sm { padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Todo App - Frontend</h1>
+      <div class="input-group">
+        <input id="todoInput" placeholder="Add a new task..." />
+        <button id="addButton">Add</button>
+      </div>
+      <ul id="todoList"></ul>
+    </div>
+
+    <script>
+      let token = localStorage.getItem('token') || '';
+
+      const login = async () => {
+        if (token) return token;
+
+        const response = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'admin', password: 'secret' })
+        });
+
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Login failed');
+        token = data.token;
+        localStorage.setItem('token', token);
+        return token;
+      };
+
+      const render = async () => {
+        const authToken = await login();
+        const response = await fetch('/items', {
+          headers: { Authorization: 'Bearer ' + authToken }
+        });
+        if (response.status === 401) {
+          localStorage.removeItem('token');
+          token = '';
+          return render();
+        }
+        const items = await response.json();
+        const list = document.getElementById('todoList');
+        list.innerHTML = '';
+
+        (items || []).forEach((item) => {
+          const li = document.createElement('li');
+          const span = document.createElement('span');
+          span.textContent = item.name;
+          if (item.done) span.className = 'done';
+
+          const button = document.createElement('button');
+          button.className = 'btn-sm';
+          button.textContent = item.done ? 'Undo' : 'Done';
+          button.addEventListener('click', async () => {
+            await fetch('/items/' + item.id, {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + authToken
+              },
+              body: JSON.stringify({ done: !item.done })
+            });
+            render();
+          });
+
+          li.append(span, button);
+          list.appendChild(li);
+        });
+      };
+
+      document.getElementById('addButton').addEventListener('click', async () => {
+        const input = document.getElementById('todoInput');
+        const value = input.value.trim();
+        if (!value) return;
+
+        const authToken = await login();
+        await fetch('/items', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + authToken
+          },
+          body: JSON.stringify({ name: value, done: false })
+        });
+
+        input.value = '';
+        render();
+      });
+
+      render();
+    </script>
+  </body>
+</html>
