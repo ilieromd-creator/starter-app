@@ -3,7 +3,7 @@ import path from 'node:path';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
-import { initializeDatabase } from './database';
+import { initializeDatabase, listItems, createItem, updateItem, removeItem, PriorityLevel } from './database';
 import { createTaskRoutes } from './modules/taskRoutes';
 import { createUserRoutes } from './modules/userRoutes';
 
@@ -29,6 +29,7 @@ const requestLog: Array<{ method: string; url: string; timestamp: string }> = []
 const port = Number(process.env.PORT || 3000);
 const db = initializeDatabase();
 const jwtSecret = process.env.JWT_SECRET || 'development-secret';
+const nvidiaApiKey = process.env.NVIDIA_API_KEY || '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';
 
 const users: Record<string, { password: string; role: string; fullName: string }> = {
   admin: { password: 'secret', role: 'admin', fullName: 'Administrator' },
@@ -117,6 +118,7 @@ app.get('/health', (_req: Request, res: Response) => {
     status: 'ok',
     service: 'starter-app',
     database: db.mode === 'supabase' ? 'supabase-postgresql' : 'in-memory',
+    aiEngine: 'nvidia-nim-ready',
     timestamp: new Date().toISOString()
   });
 });
@@ -224,7 +226,156 @@ app.get('/api/me', requireAuth, (req: Request, res: Response) => {
   res.json({ user: req.user });
 });
 
-// Borderless Monochrome Luxury Minimalist Frontend
+// Autonomous AI Copilot Agent Chat Endpoint
+app.post('/api/ai/chat', requireAuth, async (req: Request, res: Response) => {
+  const { messages, model } = req.body ?? {};
+  const selectedModel = model || 'meta/llama-3.2-11b-vision-instruct';
+
+  if (!Array.isArray(messages) || messages.length === 0) {
+    res.status(400).json({ error: 'Messages array is required' });
+    return;
+  }
+
+  try {
+    const userId = req.user?.id || req.user?.username || 'default-user';
+    const existingTasks = await listItems(db, userId);
+
+    const taskListContext =
+      existingTasks
+        .map(
+          (t) =>
+            `#${t.id}: "${t.name}" [Category: ${t.category || 'Work'}, Priority: ${t.priority || 'medium'}] (${
+              t.done ? 'COMPLETED' : 'ACTIVE'
+            })${t.description ? ' - ' + t.description : ''}`
+        )
+        .join('\n') || 'No tasks in list.';
+
+    const systemPrompt = `You are an elite Autonomous AI Task & Project Copilot inside TaskFlow SaaS.
+You help the user plan, analyze, break down, organize, and execute tasks directly in their database.
+
+CURRENT USER TASKS IN DATABASE:
+${taskListContext}
+
+AUTONOMOUS ACTIONS SPECIFICATION:
+Whenever the user asks you to create, generate, update, complete, or delete tasks, you MUST include action tags in your response. You can output one or multiple actions.
+
+1. To create a task:
+[ACTION:create_task]{"name": "Clear task title", "category": "Work|Personal|Finance|Learning|Projects", "priority": "low|medium|high|urgent", "description": "Helpful details"}[/ACTION]
+
+2. To update or complete a task:
+[ACTION:update_task]{"id": 123, "done": true}[/ACTION]
+
+3. To delete a task:
+[ACTION:delete_task]{"id": 123}[/ACTION]
+
+Always provide a concise, friendly response alongside the action tags.`;
+
+    const aiMessages = [
+      { role: 'system', content: systemPrompt },
+      ...messages.map((m: { role: string; content: string }) => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: String(m.content)
+      }))
+    ];
+
+    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + nvidiaApiKey,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: selectedModel,
+        messages: aiMessages,
+        max_tokens: 800,
+        temperature: 0.3
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      res.status(response.status).json({ error: `NVIDIA AI Error: ${errText}` });
+      return;
+    }
+
+    const aiData = await response.json();
+    const rawReply = aiData.choices?.[0]?.message?.content || '';
+
+    // Parse and execute actions
+    const actionsExecuted: Array<{ type: string; details: any }> = [];
+
+    // 1. Create tasks
+    const createMatches = rawReply.matchAll(/\[ACTION:create_task\]([\s\S]*?)\[\/ACTION\]/g);
+    for (const match of createMatches) {
+      try {
+        const payload = JSON.parse(match[1].trim());
+        if (payload.name) {
+          const item = await createItem(
+            db,
+            payload.name,
+            Boolean(payload.done),
+            userId,
+            {
+              category: payload.category || 'Work',
+              priority: (payload.priority as PriorityLevel) || 'medium',
+              description: payload.description
+            }
+          );
+          actionsExecuted.push({ type: 'create_task', details: item });
+        }
+      } catch (e) {}
+    }
+
+    // 2. Update tasks
+    const updateMatches = rawReply.matchAll(/\[ACTION:update_task\]([\s\S]*?)\[\/ACTION\]/g);
+    for (const match of updateMatches) {
+      try {
+        const payload = JSON.parse(match[1].trim());
+        if (payload.id) {
+          const item = await updateItem(
+            db,
+            Number(payload.id),
+            {
+              done: payload.done !== undefined ? Boolean(payload.done) : undefined,
+              name: payload.name,
+              priority: payload.priority,
+              category: payload.category
+            },
+            userId
+          );
+          if (item) actionsExecuted.push({ type: 'update_task', details: item });
+        }
+      } catch (e) {}
+    }
+
+    // 3. Delete tasks
+    const deleteMatches = rawReply.matchAll(/\[ACTION:delete_task\]([\s\S]*?)\[\/ACTION\]/g);
+    for (const match of deleteMatches) {
+      try {
+        const payload = JSON.parse(match[1].trim());
+        if (payload.id) {
+          const ok = await removeItem(db, Number(payload.id), userId);
+          if (ok) actionsExecuted.push({ type: 'delete_task', details: { id: payload.id } });
+        }
+      } catch (e) {}
+    }
+
+    // Clean up raw action tags from user reply
+    const cleanReply = rawReply
+      .replace(/\[ACTION:[\s\S]*?\[\/ACTION\]/g, '')
+      .trim();
+
+    res.json({
+      reply: cleanReply || 'Tasks executed and updated successfully.',
+      actionsExecuted,
+      modelUsed: selectedModel
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Internal AI engine error' });
+  }
+});
+
+// Borderless Monochrome Luxury Minimalist Frontend with AI Copilot
 app.get('/', (_req: Request, res: Response) => {
   res.type('html');
   res.send(`<!DOCTYPE html>
@@ -232,7 +383,7 @@ app.get('/', (_req: Request, res: Response) => {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Todo App - Starter App Frontend</title>
+    <title>Todo App - TaskFlow SaaS Starter App Frontend</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -298,7 +449,7 @@ app.get('/', (_req: Request, res: Response) => {
       .user-actions {
         display: flex;
         align-items: center;
-        gap: 1rem;
+        gap: 0.85rem;
       }
       .profile-capsule {
         display: flex;
@@ -349,6 +500,15 @@ app.get('/', (_req: Request, res: Response) => {
       .btn-primary:hover { background: #e4e4e7; transform: translateY(-1px); }
       .btn-secondary { background: var(--surface-2); color: var(--text-pearl); }
       .btn-secondary:hover { background: var(--surface-3); color: #ffffff; }
+      .btn-ai {
+        background: #ffffff;
+        color: #09090b;
+        font-weight: 700;
+      }
+      .btn-ai:hover {
+        background: #e4e4e7;
+        transform: translateY(-1px);
+      }
       .btn-danger-ghost { background: transparent; color: var(--text-subtle); }
       .btn-danger-ghost:hover { background: var(--surface-2); color: #ffffff; }
 
@@ -552,6 +712,95 @@ app.get('/', (_req: Request, res: Response) => {
         font-size: 0.9rem;
       }
 
+      /* AI Copilot Drawer */
+      .ai-drawer-curtain {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(10px);
+        display: none;
+        justify-content: flex-end;
+        z-index: 90;
+      }
+      .ai-drawer {
+        background: var(--surface-1);
+        width: 100%;
+        max-width: 480px;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        padding: 1.5rem;
+        gap: 1rem;
+        box-shadow: -10px 0 30px rgba(0,0,0,0.5);
+      }
+      .drawer-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .model-picker {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+      .chat-stream {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 0.85rem;
+        padding-right: 0.5rem;
+      }
+      .chat-msg {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        max-width: 88%;
+        font-size: 0.88rem;
+        line-height: 1.45;
+      }
+      .chat-msg.user {
+        align-self: flex-end;
+        background: var(--surface-3);
+        color: var(--text-pure);
+        padding: 0.75rem 1rem;
+        border-radius: 12px 12px 2px 12px;
+      }
+      .chat-msg.assistant {
+        align-self: flex-start;
+        background: var(--surface-2);
+        color: var(--text-pearl);
+        padding: 0.85rem 1.1rem;
+        border-radius: 12px 12px 12px 2px;
+      }
+      .action-pill-notification {
+        background: #ffffff;
+        color: #09090b;
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 0.35rem 0.65rem;
+        border-radius: 6px;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        margin-top: 0.4rem;
+      }
+      .quick-chips {
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+      }
+      .chip {
+        font-size: 0.72rem;
+        padding: 0.35rem 0.65rem;
+        background: var(--surface-2);
+        border-radius: 6px;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .chip:hover { background: var(--surface-3); color: #ffffff; }
+
       /* Modal */
       .modal-curtain {
         position: fixed;
@@ -611,6 +860,10 @@ app.get('/', (_req: Request, res: Response) => {
           <span>TaskFlow</span>
         </a>
         <div class="user-actions">
+          <button id="openAiBtn" class="btn-luxury btn-ai">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+            <span>AI Copilot</span>
+          </button>
           <div class="profile-capsule">
             <div id="userAvatar" class="avatar-circle">A</div>
             <span id="userName" style="font-weight: 600;">Admin</span>
@@ -713,6 +966,49 @@ app.get('/', (_req: Request, res: Response) => {
       <section id="taskList" class="item-stack"></section>
     </main>
 
+    <!-- AI Copilot Drawer -->
+    <div id="aiDrawerCurtain" class="ai-drawer-curtain">
+      <div class="ai-drawer">
+        <div class="drawer-head">
+          <div style="display: flex; align-items: center; gap: 0.6rem; font-weight: 700;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></svg>
+            <span>Autonomous Copilot</span>
+          </div>
+          <button id="closeAiDrawerBtn" class="btn-luxury btn-danger-ghost" style="padding: 0.3rem 0.5rem;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+
+        <div class="model-picker">
+          <label style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">AI Model</label>
+          <select id="aiModelSelect">
+            <option value="meta/llama-3.2-11b-vision-instruct" selected>Llama 3.2 11B Vision (Fast & Accurate)</option>
+            <option value="openai/gpt-oss-120b">GPT OSS 120B (High Reasoning)</option>
+            <option value="meta/llama-3.2-90b-vision-instruct">Llama 3.2 90B Vision</option>
+          </select>
+        </div>
+
+        <div class="quick-chips">
+          <div class="chip" onclick="sendQuickPrompt('Plan a 4-step marketing launch')">Launch Marketing</div>
+          <div class="chip" onclick="sendQuickPrompt('Break down database security audit')">Security Audit</div>
+          <div class="chip" onclick="sendQuickPrompt('List my active urgent tasks')">Review Urgent</div>
+        </div>
+
+        <div id="chatStream" class="chat-stream">
+          <div class="chat-msg assistant">
+            <span>Hello! I am your autonomous AI copilot. Ask me to plan projects, create tasks, or organize your database in natural language.</span>
+          </div>
+        </div>
+
+        <form id="chatForm" style="display: flex; gap: 0.5rem;">
+          <input id="chatInput" placeholder="Ask AI to plan, create, or update tasks..." required />
+          <button type="submit" id="chatSendBtn" class="btn-luxury btn-primary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" x2="11" y1="2" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </form>
+      </div>
+    </div>
+
     <!-- Minimalist Auth Modal -->
     <div id="authModal" class="modal-curtain">
       <div class="modal-panel">
@@ -754,6 +1050,7 @@ app.get('/', (_req: Request, res: Response) => {
       let currentUser = JSON.parse(localStorage.getItem('user') || '{}');
       let currentFilterStatus = 'all';
       let currentSearchQuery = '';
+      let chatHistory = [];
 
       async function checkAuth() {
         if (!token) {
@@ -957,6 +1254,70 @@ app.get('/', (_req: Request, res: Response) => {
         }, 200);
       };
 
+      // AI Copilot Drawer handling
+      const aiCurtain = document.getElementById('aiDrawerCurtain');
+      document.getElementById('openAiBtn').onclick = () => { aiCurtain.style.display = 'flex'; };
+      document.getElementById('closeAiDrawerBtn').onclick = () => { aiCurtain.style.display = 'none'; };
+
+      function sendQuickPrompt(promptText) {
+        document.getElementById('chatInput').value = promptText;
+        document.getElementById('chatForm').dispatchEvent(new Event('submit'));
+      }
+
+      document.getElementById('chatForm').onsubmit = async (e) => {
+        e.preventDefault();
+        const input = document.getElementById('chatInput');
+        const userMsg = input.value.trim();
+        if (!userMsg) return;
+
+        const model = document.getElementById('aiModelSelect').value;
+        input.value = '';
+
+        // Add user message to UI
+        const stream = document.getElementById('chatStream');
+        const userBubble = document.createElement('div');
+        userBubble.className = 'chat-msg user';
+        userBubble.textContent = userMsg;
+        stream.appendChild(userBubble);
+
+        chatHistory.push({ role: 'user', content: userMsg });
+
+        // Add loading bubble
+        const botBubble = document.createElement('div');
+        botBubble.className = 'chat-msg assistant';
+        botBubble.textContent = 'Thinking and executing...';
+        stream.appendChild(botBubble);
+        stream.scrollTop = stream.scrollHeight;
+
+        try {
+          const res = await fetch('/api/ai/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+            body: JSON.stringify({ messages: chatHistory, model })
+          });
+
+          const data = await res.json();
+          if (res.ok) {
+            botBubble.innerHTML = data.reply;
+            chatHistory.push({ role: 'assistant', content: data.reply });
+
+            if (data.actionsExecuted && data.actionsExecuted.length > 0) {
+              const notif = document.createElement('div');
+              notif.className = 'action-pill-notification';
+              notif.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> Executed ' + data.actionsExecuted.length + ' database action(s)';
+              botBubble.appendChild(notif);
+              loadTasks(); // auto refresh tasks and KPIs
+            }
+          } else {
+            botBubble.textContent = 'Error: ' + (data.error || 'Failed to process request');
+          }
+        } catch (err) {
+          botBubble.textContent = 'Network or AI API error';
+        }
+        stream.scrollTop = stream.scrollHeight;
+      };
+
+      // Modal Handling
       const modal = document.getElementById('authModal');
       let isSignUp = false;
 
